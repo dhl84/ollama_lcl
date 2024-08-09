@@ -2,16 +2,20 @@ import sys
 import re
 import requests
 import json
+import argparse
 
-MAX_TOKENS = 1024  # Define a limit for the context window
+MAX_TOKENS = 4000  # Define a limit for the context window
 
 def send_prompt(prompt, context=[]):
     url = "http://192.168.1.125:11434/api/chat"
     headers = {"Content-Type": "application/json"}
+    
     payload = {
         "model": "llama3.1:latest",
         "messages": context + [{"role": "user", "content": prompt}]
     }
+
+    # print(f"Sending payload (first 200 chars): {str(payload)[:200]}")
     
     try:
         response = requests.post(url, headers=headers, data=json.dumps(payload))
@@ -42,9 +46,49 @@ def summarize_context(context, max_tokens=MAX_TOKENS):
         return new_context
     return context
 
-def main():
+def main(document_path=None):
     context = []
     conversation_file = "conversation.txt"
+    document_summaries = []
+    
+    if document_path:
+        try:
+            with open(document_path, 'r', encoding='utf-8') as file:
+                document_content = file.read()
+            print(f"Document loaded: {document_path}")
+            print(f"Document length: {len(document_content)} characters")
+            
+            chunk_size = 8000
+            chunks = [document_content[i:i+chunk_size] for i in range(0, len(document_content), chunk_size)]
+            
+            print(f"Document split into {len(chunks)} chunks of {chunk_size} characters each.")
+            
+            for i, chunk in enumerate(chunks):
+                print(f"\nAnalyzing chunk {i+1}/{len(chunks)}")
+                test_prompt = f"Here's a part of a document to analyze (part {i+1}/{len(chunks)}):\n\n{chunk}\n\nPlease summarize the key points of this part of the document in 2-3 sentences."
+                results = send_prompt(test_prompt, [])  # Empty context for each chunk
+                
+                full_response = []
+                for res in results:
+                    if 'message' in res:
+                        full_response.append(res['message']['content'])
+                
+                cleaned_response = clean_text(' '.join(full_response))
+                print(f"Summary: {cleaned_response}\n")
+                document_summaries.append(cleaned_response)
+            
+            # Add a condensed version of all summaries to the context
+            context.append({"role": "system", "content": "You have analyzed a document in multiple parts. Here are the key points from each part: " + " ".join(document_summaries)})
+            
+            print("\nDocument analysis complete. You can now ask questions about the document.")
+            
+        except FileNotFoundError:
+            print(f"Error: The file {document_path} was not found.")
+            return
+        except Exception as e:
+            print(f"An error occurred while reading the file: {e}")
+            return
+
     print("Chat with your model. Type 'exit' to end the conversation.")
     
     while True:
@@ -52,38 +96,26 @@ def main():
         if user_input.lower() == "exit":
             break
 
-        # Summarize context if it exceeds the maximum token limit
-        context = summarize_context(context)
-
-        results = send_prompt(user_input, context)
+        # Include the document context in each prompt
+        full_prompt = f"Based on the document analysis provided earlier, please answer the following question: {user_input}"
+        results = send_prompt(full_prompt, context)
+        
         full_response = []
-        partial_word = ""
-
         for res in results:
             if 'message' in res:
-                message = res['message']['content']
-                # Check if the previous part ended mid-word
-                if partial_word:
-                    message = partial_word + message
-                    partial_word = ""
-                # Check if the current message ends mid-word
-                if re.match(r'.*\w$', message):
-                    partial_word = message
-                else:
-                    full_response.append(message.strip())
+                full_response.append(res['message']['content'])
         
-        # Join the full response parts with a space and clean it
         cleaned_response = clean_text(' '.join(full_response))
         print(f"Model: {cleaned_response}\n")
 
-        # Update context with user input and model response
-        context.append({"role": "user", "content": user_input})
-        context.append({"role": "assistant", "content": cleaned_response})
-        
         # Log the conversation to the file
         with open(conversation_file, "a", encoding="utf-8") as log_file:
             log_file.write(f"You: {user_input}\n")
             log_file.write(f"Model: {cleaned_response}\n\n")
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser(description="Chat with an Ollama model and optionally analyze a text document.")
+    parser.add_argument("--document", type=str, help="Path to the text document to analyze", default=None)
+    args = parser.parse_args()
+    
+    main(args.document)
